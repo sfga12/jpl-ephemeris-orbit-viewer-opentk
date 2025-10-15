@@ -66,6 +66,10 @@ namespace JplEphemerisOrbitViewer.Horizons
         private static readonly Regex ReCenterCylindric = new(@"^Center cylindric\s*:\s*([\-0-9.]+),\s*([\-0-9.]+),\s*([\-0-9.]+)", RegexOptions.Compiled);
         private static readonly Regex ReStateVectorType = new(@"^Output type\s*:\s*GEOMETRIC cartesian states", RegexOptions.Compiled);
 
+        // New: “GEOPHYSICAL PROPERTIES” support for target Equatorial/Polar radii
+        private static readonly Regex ReEquatorialRadius = new(@"^Equ\.\s*radius,\s*km\s*=\s*([0-9.\-]+)", RegexOptions.Compiled);
+        private static readonly Regex RePolarAxis = new(@"^Polar\s*axis,\s*km\s*=\s*([0-9.\-]+)", RegexOptions.Compiled);
+
         // RA/DEC row regex
         private static readonly Regex TimeAtStart = new(@"^\s*(\d{4}-[A-Za-z]{3}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", RegexOptions.Compiled);
         private static readonly Regex RaDecGroup = new(@"\b(\d{2})\s+(\d{2})\s+(\d{1,2}(?:\.\d+)?)\s+([+\-]\d{2})\s+(\d{2})\s+(\d{1,2}(?:\.\d+)?)", RegexOptions.Compiled);
@@ -93,6 +97,10 @@ namespace JplEphemerisOrbitViewer.Horizons
             string target = "", center = "";
             Vector3d targetR = default, centerR = default;
             bool haveTargetR = false, haveCenterR = false;
+
+            // New: stash Equatorial/Polar from GEOPHYSICAL PROPERTIES block for the target
+            double? targetEquKm = null;
+            double? targetPolarKm = null;
 
             bool isTopocentric = false;
             double siteLonDeg = 0, siteLatDeg = 0, siteAltKm = 0;
@@ -133,6 +141,17 @@ namespace JplEphemerisOrbitViewer.Horizons
                         haveCenterR = true;
                     }
                 }
+                // Pick up Equatorial/Polar radii from the geophysical block for the TARGET
+                else if (line.StartsWith("Equ. radius", StringComparison.Ordinal))
+                {
+                    var m = ReEquatorialRadius.Match(line);
+                    if (m.Success) targetEquKm = ParseD(m.Groups[1]);
+                }
+                else if (line.StartsWith("Polar axis", StringComparison.Ordinal))
+                {
+                    var m = RePolarAxis.Match(line);
+                    if (m.Success) targetPolarKm = ParseD(m.Groups[1]);
+                }
                 else if (ReCenterSite.IsMatch(line))
                 {
                     isTopocentric = true;
@@ -163,6 +182,16 @@ namespace JplEphemerisOrbitViewer.Horizons
                 {
                     dataKind = EphemerisDataKind.StateVector;
                 }
+            }
+
+            // Prefer GEOPHYSICAL Equ./Polar for target if explicit Target radii are not present
+            if (!haveTargetR && (targetEquKm.HasValue || targetPolarKm.HasValue))
+            {
+                double a = targetEquKm ?? targetPolarKm ?? 1000.0;
+                double b = a;
+                double c = targetPolarKm ?? targetEquKm ?? 1000.0;
+                targetR = new Vector3d(a, b, c);
+                haveTargetR = true;
             }
 
             var entries = dataKind == EphemerisDataKind.StateVector
@@ -431,7 +460,7 @@ namespace JplEphemerisOrbitViewer.Horizons
             return list;
         }
 
-        // -------- Helpers ----------
+      
         private static double ParseD(Group g) => double.Parse(g.Value, CultureInfo.InvariantCulture);
         private static double ParseSci(string s) => double.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
         private static bool TryD(Match m, out double v) =>

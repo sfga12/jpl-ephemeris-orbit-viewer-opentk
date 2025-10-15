@@ -3,7 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using ImGuiNET;
-using OpenTK.Graphics.OpenGL4;
+using OpenTK.Graphics.OpenGL4; 
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
@@ -24,7 +24,7 @@ namespace JplEphemerisOrbitViewer
         private TargetOrbitCamera _cam = new();
         private SceneObject? _selected;
 
-        // New: import helpers
+       
         private string? _sceneCenter; // enforced center body name
         private Mesh? _sphereMesh;
         private string _importPath = "";
@@ -33,18 +33,19 @@ namespace JplEphemerisOrbitViewer
         // Scales (decoupled)
         private float _distUnitsPerAU = 500f;
         private float _radiiUnitsPerKm = 0.0001f;
-        private float _minRadiusUnits = 10.0f;
+        private float _minRadiusUnits = 0.01f;
 
         private const double KmPerAU = 149_597_870.7;
 
         private SceneObject? _centerObject;
 
-        // NEW: Ephemeris playback and orbits
+     
         private readonly Dictionary<SceneObject, EphemerisTrack> _tracks = new();
         private readonly Dictionary<SceneObject, OrbitLineRenderer> _orbits = new();
 
-        // NEW: per-object orbit color
+  
         private readonly Dictionary<SceneObject, Vector3> _orbitColors = new();
+        private readonly Dictionary<SceneObject, Vector3> _baseScales = new();
 
         private DateTime? _sceneStartUtc;
         private DateTime? _sceneEndUtc;
@@ -59,6 +60,7 @@ namespace JplEphemerisOrbitViewer
         private Vector3 _orbitColor = new(0.25f, 0.6f, 1.0f);
 
         private float _lastOrbitUnitsPerAU = -1f;
+        private float _orbitLineWidthPx = 1.5f;
 
         public Scene(int width, int height)
             : base(GameWindowSettings.Default, new NativeWindowSettings
@@ -369,18 +371,28 @@ namespace JplEphemerisOrbitViewer
             GL.ClearColor(0f, 0f, 0f, 1f);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
+            // Responsive 
+            UpdateResponsiveSizes();
+
             var view = _cam.GetViewMatrix(target);
+
+            
+            _cam.GetClipPlanes(sceneExtent: _cam.Distance, out float zNear, out float zFar);
+
             var projection = Matrix4.CreatePerspectiveFieldOfView(
                 MathHelper.DegreesToRadians(45f),
-                (float)_rt.Width / _rt.Height, 0.1f, 10000f);
+                (float)_rt.Width / _rt.Height, zNear, zFar);
 
             if (_drawOrbits)
             {
+                
+                GL.LineWidth(_orbitLineWidthPx);
                 foreach (var (obj, orbit) in _orbits)
                 {
                     var col = _orbitColors.TryGetValue(obj, out var c) ? c : _orbitColor;
-                    orbit.Draw(_shader, view, projection, col, _orbitLineWidth);
+                    orbit.Draw(_shader, view, projection, col, _orbitLineWidthPx); 
                 }
+                GL.LineWidth(1.0f);
             }
 
             foreach (var o in _objects)
@@ -471,6 +483,7 @@ namespace JplEphemerisOrbitViewer
                     return;
                 }
 
+               
                 if (_centerObject == null)
                 {
                     var centerScale = ToRadiusUnits(eph.CenterRadiiKmABC);
@@ -485,6 +498,7 @@ namespace JplEphemerisOrbitViewer
                         Color = Vector3.One,
                     };
                     _objects.Add(_centerObject);
+                    _baseScales[_centerObject] = _centerObject.Scale; // NEW
                 }
 
                 if (track.Count == 0)
@@ -498,6 +512,7 @@ namespace JplEphemerisOrbitViewer
                 var targetScale = ToRadiusUnits(eph.TargetRadiiKmABC);
                 var targetTex = CreateTextureForBody(eph.TargetName);
 
+                
                 var go = new SceneObject(_sphereMesh!, _shader, texture: targetTex)
                 {
                     Name = eph.TargetName,
@@ -509,16 +524,17 @@ namespace JplEphemerisOrbitViewer
                 };
 
                 _objects.Add(go);
+                _baseScales[go] = go.Scale; // NEW
                 _selected = go;
                 _picker.SetSelected(go);
 
-                _tracks[go] = track;
+               
+                _tracks[go] = track; 
 
                 var orbit = new OrbitLineRenderer();
                 orbit.UpdateFromTrack(track, _distUnitsPerAU);
                 _orbits[go] = orbit;
                 _lastOrbitUnitsPerAU = _distUnitsPerAU;
-
                 _orbitColors[go] = _orbitColor;
             }
             catch (Exception ex)
@@ -549,14 +565,49 @@ namespace JplEphemerisOrbitViewer
 
         private static float Max3(Vector3 v) => MathF.Max(v.X, MathF.Max(v.Y, v.Z));
 
+        
+        private void UpdateResponsiveSizes()
+        {
+            // Viewport yüksekliğini al
+            int[] vp = new int[4];
+            GL.GetInteger(GetPName.Viewport, vp);
+            int viewportH = Math.Max(1, vp[3]);
+
+            
+            _cam.FovY = MathHelper.DegreesToRadians(45f);
+
+            
+            const float minPixels = 6f;     
+            const float maxScale  = 1e6f;    
+            foreach (var o in _objects)
+            {
+                if (!_baseScales.TryGetValue(o, out var baseScale))
+                    baseScale = o.Scale;
+
+                float baseRadius = o.BoundingRadiusLocal * Max3(baseScale);
+                float factor = _cam.GetMinScreenScaleForSphere(baseRadius, viewportH, minPixels, maxScale);
+                o.Scale = baseScale * factor;
+            }
+
+           
+            _orbitLineWidthPx = _cam.GetResponsiveLineWidth(
+                dNear: 100f,       
+                dFar:  100000f,    
+                minPx: 1.25f,
+                maxPx: 3.0f);
+        }
+
+       
         private void FrameOnObject(SceneObject o)
         {
             float baseRadius = o.BoundingRadiusLocal * MathF.Max(o.Scale.X, MathF.Max(o.Scale.Y, o.Scale.Z));
             float fovY = MathHelper.DegreesToRadians(45f);
             float desired = MathF.Max(0.1f, baseRadius / MathF.Tan(fovY * 0.5f) * 1.2f);
             _cam.Distance = desired;
+            _cam.FovY = fovY;            
             _selected = o;
-            _picker?.SetSelected(o);
+
+            UpdateResponsiveSizes();     
         }
 
         protected override void OnFramebufferResize(FramebufferResizeEventArgs e)
