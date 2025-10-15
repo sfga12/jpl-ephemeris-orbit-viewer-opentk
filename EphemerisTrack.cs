@@ -22,7 +22,6 @@ namespace JplEphemerisOrbitViewer
             if (t <= StartUtc) return ToUnits(0, unitsPerAU);
             if (t >= EndUtc) return ToUnits(Count - 1, unitsPerAU);
 
-            // Binary search
             int lo = 0, hi = TimesUtc.Count - 1;
             while (lo + 1 < hi)
             {
@@ -57,6 +56,29 @@ namespace JplEphemerisOrbitViewer
                 tr.DeltaAu.Add(e.DeltaAu);
             }
             return tr;
+        }
+
+        // distance (AU) at time t using linear interpolation on Horizons DeltaAu
+        public double EvaluateDistanceAu(DateTime t)
+        {
+            if (TimesUtc.Count == 0) return 0.0;
+            if (t <= StartUtc) return DeltaAu[0];
+            if (t >= EndUtc) return DeltaAu[^1];
+
+            int lo = 0, hi = TimesUtc.Count - 1;
+            while (lo + 1 < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (TimesUtc[mid] <= t) lo = mid; else hi = mid;
+            }
+
+            var t0 = TimesUtc[lo];
+            var t1 = TimesUtc[hi];
+            double denom = Math.Max((t1 - t0).TotalSeconds, 1e-6);
+            double alpha = ((t - t0).TotalSeconds / denom);
+            double d0 = DeltaAu[lo];
+            double d1 = DeltaAu[hi];
+            return d0 + (d1 - d0) * Math.Clamp(alpha, 0.0, 1.0);
         }
     }
 }

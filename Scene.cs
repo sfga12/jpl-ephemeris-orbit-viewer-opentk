@@ -24,7 +24,7 @@ namespace JplEphemerisOrbitViewer
         private TargetOrbitCamera _cam = new();
         private SceneObject? _selected;
 
-       
+        // New: import helpers
         private string? _sceneCenter; // enforced center body name
         private Mesh? _sphereMesh;
         private string _importPath = "";
@@ -39,13 +39,20 @@ namespace JplEphemerisOrbitViewer
 
         private SceneObject? _centerObject;
 
-     
+        // Ephemeris playback and orbits
         private readonly Dictionary<SceneObject, EphemerisTrack> _tracks = new();
         private readonly Dictionary<SceneObject, OrbitLineRenderer> _orbits = new();
 
-  
+        // per-object orbit color
         private readonly Dictionary<SceneObject, Vector3> _orbitColors = new();
         private readonly Dictionary<SceneObject, Vector3> _baseScales = new();
+
+        //per-object orbit visibility
+        private readonly Dictionary<SceneObject, bool> _orbitVisible = new();
+
+        // per-object distance line
+        private readonly Dictionary<SceneObject, bool> _distLineVisible = new();
+        private readonly Dictionary<SceneObject, DistanceLineRenderer> _distLines = new();
 
         private DateTime? _sceneStartUtc;
         private DateTime? _sceneEndUtc;
@@ -61,6 +68,20 @@ namespace JplEphemerisOrbitViewer
 
         private float _lastOrbitUnitsPerAU = -1f;
         private float _orbitLineWidthPx = 1.5f;
+
+        // responsive scaling controls
+        private bool _responsiveScaleEnabled = true;
+        private float _minPixelsForObjects = 8f;     // keep at least this on-screen size
+        private float _orbitWidthMinPx = 1.25f;
+        private float _orbitWidthMaxPx = 3.0f;
+        private float _orbitWidthGrowNear = 100f;
+        private float _orbitWidthGrowFar = 100000f;
+
+        // Settings panel visibility
+        private bool _showSettings = false;
+
+        // Fields
+        private Texture? _whiteTexture;
 
         public Scene(int width, int height)
             : base(GameWindowSettings.Default, new NativeWindowSettings
@@ -99,6 +120,9 @@ namespace JplEphemerisOrbitViewer
             SphereBuilder.Create(32, 64, out var v, out var idx);
             _sphereMesh = new Mesh(v, idx);
 
+            // White texture (1x1 solid white)
+            _whiteTexture = Texture.CreateSolidColor(1, 1, 255, 255, 255, 255);
+
             GL.Viewport(0, 0, FramebufferSize.X, FramebufferSize.Y);
             _imgui.WindowResized(Size.X, Size.Y);
             ImGui.StyleColorsDark();
@@ -134,7 +158,7 @@ namespace JplEphemerisOrbitViewer
                 ImGui.EndMainMenuBar();
             }
 
-            float pad = 12f, leftPanelW = 420f, rightPanelW = 320f;
+            float pad = 12f, leftPanelW = 420f, rightPanelW = 340f, settingsPanelW = 360f;
             var vpMain = ImGui.GetMainViewport();
 
             // LEFT: Objects + Import + Playback
@@ -237,18 +261,11 @@ namespace JplEphemerisOrbitViewer
                 ImGui.Text("Import objects with Horizons data to enable playback.");
             }
 
+            // Settings toggle (opens/closes left-docked Settings window)
             ImGui.Separator();
-            ImGui.Text("Scale (distance vs radius)");
-            ImGui.Separator();
-
-            ImGui.DragFloat("Units per AU", ref _distUnitsPerAU, 1f, 50f, 5000f);
-            ImGui.DragFloat("Radii units per km", ref _radiiUnitsPerKm, 1e-6f, 1e-6f, 0.01f, "%.6f");
-            ImGui.DragFloat("Min radius (units)", ref _minRadiusUnits, 0.01f, 0.01f, 20f);
-
-            if (Math.Abs(_lastOrbitUnitsPerAU - _distUnitsPerAU) > 1e-6f)
+            if (ImGui.Button(_showSettings ? "Hide Settings" : "Settings"))
             {
-                RebuildAllOrbits();
-                _lastOrbitUnitsPerAU = _distUnitsPerAU;
+                _showSettings = !_showSettings;
             }
 
             ImGui.Separator();
@@ -276,6 +293,48 @@ namespace JplEphemerisOrbitViewer
             ImGui.EndChild();
             ImGui.End();
 
+            // SETTINGS: Separate window docked next to the left panel
+            if (_showSettings)
+            {
+                ImGui.SetNextWindowPos(
+                    new System.Numerics.Vector2(vpMain.WorkPos.X + pad + leftPanelW + pad, vpMain.WorkPos.Y + pad),
+                    ImGuiCond.Always);
+                ImGui.SetNextWindowSize(new System.Numerics.Vector2(settingsPanelW, vpMain.WorkSize.Y - 2 * pad), ImGuiCond.Always);
+
+                bool open = _showSettings;
+                ImGui.Begin("Settings", ref open,
+                    ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize |
+                    ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings);
+
+                ImGui.Text("Scale (distance vs radius)");
+                ImGui.Separator();
+                ImGui.DragFloat("Units per AU", ref _distUnitsPerAU, 1f, 50f, 5000f);
+                ImGui.DragFloat("Radii units per km", ref _radiiUnitsPerKm, 1e-6f, 1e-6f, 0.01f, "%.6f");
+                ImGui.DragFloat("Min radius (units)", ref _minRadiusUnits, 0.01f, 0.01f, 20f);
+
+                ImGui.Separator();
+                ImGui.Text("Responsive scale");
+                ImGui.Checkbox("Enable (grow-only when zooming out)", ref _responsiveScaleEnabled);
+                ImGui.SliderFloat("Object min size (px)", ref _minPixelsForObjects, 2f, 32f);
+                ImGui.SliderFloat("Orbit width min (px)", ref _orbitWidthMinPx, 1f, 8f);
+                ImGui.SliderFloat("Orbit width max (px)", ref _orbitWidthMaxPx, 1f, 16f);
+                if (_orbitWidthMaxPx < _orbitWidthMinPx) _orbitWidthMaxPx = _orbitWidthMinPx;
+
+                ImGui.DragFloat("Orbit grow near (dist)", ref _orbitWidthGrowNear, 1f, 0f, 1e7f);
+                ImGui.DragFloat("Orbit grow far (dist)", ref _orbitWidthGrowFar, 1f, 1f, 1e8f);
+                if (_orbitWidthGrowFar <= _orbitWidthGrowNear) _orbitWidthGrowFar = _orbitWidthGrowNear + 1f;
+
+                // Rebuild orbits if distance scale changed
+                if (Math.Abs(_lastOrbitUnitsPerAU - _distUnitsPerAU) > 1e-6f)
+                {
+                    RebuildAllOrbits();
+                    _lastOrbitUnitsPerAU = _distUnitsPerAU;
+                }
+
+                ImGui.End();
+                _showSettings = open; // sync with [x]
+            }
+
             // RIGHT: Inspector
             ImGui.SetNextWindowPos(
                 new System.Numerics.Vector2(vpMain.WorkPos.X + vpMain.WorkSize.X - pad - rightPanelW, vpMain.WorkPos.Y + pad),
@@ -291,6 +350,13 @@ namespace JplEphemerisOrbitViewer
                 ImGui.Text($"Position: {_selected.Position.X:F3}, {_selected.Position.Y:F3}, {_selected.Position.Z:F3}");
                 ImGui.Text($"Scale (units): {_selected.Scale.X:F3}, {_selected.Scale.Y:F3}, {_selected.Scale.Z:F3}");
 
+                // Distance to center (real values)
+                if (_centerObject != null && !ReferenceEquals(_selected, _centerObject))
+                {
+                    var (au, km) = GetDistanceToCenter(_selected);
+                    ImGui.Text($"Distance to center: {au:F6} AU  ({km:0} km)");
+                }
+
                 ImGui.Separator();
                 bool isCenter = ReferenceEquals(_selected, _centerObject);
                 ImGui.BeginDisabled(isCenter);
@@ -305,6 +371,7 @@ namespace JplEphemerisOrbitViewer
                     ImGui.TextDisabled("(center cannot be deleted)");
                 }
 
+                // Orbit color + visibility
                 if (_orbits.ContainsKey(_selected))
                 {
                     var cur = _orbitColors.TryGetValue(_selected, out var c) ? c : _orbitColor;
@@ -313,11 +380,55 @@ namespace JplEphemerisOrbitViewer
                     {
                         _orbitColors[_selected] = new Vector3(colorSys.X, colorSys.Y, colorSys.Z);
                     }
+                    bool vis = _orbitVisible.TryGetValue(_selected, out var vvis) ? vvis : true;
+                    if (ImGui.Checkbox("Show Orbit", ref vis))
+                    {
+                        _orbitVisible[_selected] = vis;
+                    }
                     ImGui.SameLine();
                     if (ImGui.Button("Reset Orbit Color"))
                     {
                         _orbitColors[_selected] = _orbitColor;
                     }
+                }
+
+                // Distance line visibility (disable for center)
+                bool canShowDist = _centerObject != null && !ReferenceEquals(_selected, _centerObject);
+                bool distVis = _distLineVisible.TryGetValue(_selected, out var dv) ? dv : false;
+                ImGui.BeginDisabled(!canShowDist);
+                if (ImGui.Checkbox("Show Center Distance Vector", ref distVis))
+                {
+                    _distLineVisible[_selected] = distVis;
+                    if (distVis && !_distLines.ContainsKey(_selected))
+                        _distLines[_selected] = new DistanceLineRenderer();
+                }
+                ImGui.EndDisabled();
+
+                // Texture controls (unchanged) ...
+                ImGui.Separator();
+                ImGui.Text("Texture");
+                if (ImGui.Button("Load Texture..."))
+                {
+                    var res = NativeFileDialogSharp.Dialog.FileOpen("png,jpg,jpeg,bmp,tga,hdr");
+                    if (res.IsOk && !string.IsNullOrWhiteSpace(res.Path) && File.Exists(res.Path))
+                        TrySetSelectedTextureFromPath(res.Path);
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Clear Texture"))
+                {
+                    if (_selected != null && _whiteTexture != null)
+                    {
+                        bool disposeOld = _selected.Texture != _whiteTexture;
+                        _selected.SetTexture(_whiteTexture, disposeOld);
+                        _selected.Color = Vector3.One; // ensure pure white
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(_importError))
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, new System.Numerics.Vector4(1, 0.4f, 0.4f, 1));
+                    ImGui.TextWrapped(_importError);
+                    ImGui.PopStyleColor();
                 }
             }
             else
@@ -326,10 +437,11 @@ namespace JplEphemerisOrbitViewer
             }
             ImGui.End();
 
-            // CENTER: Viewport
-            float viewX = vpMain.WorkPos.X + leftPanelW + 2 * pad;
+            // CENTER: Viewport (render)
+            float settingsOffset = _showSettings ? (settingsPanelW + pad) : 0f;
+            float viewX = vpMain.WorkPos.X + leftPanelW + 2 * pad + settingsOffset;
             float viewY = vpMain.WorkPos.Y + pad;
-            float viewWf = MathF.Max(1, vpMain.WorkSize.X - leftPanelW - rightPanelW - 4 * pad);
+            float viewWf = MathF.Max(1, vpMain.WorkSize.X - leftPanelW - rightPanelW - 4 * pad - settingsOffset);
             float viewHf = MathF.Max(1, vpMain.WorkSize.Y - 2 * pad);
 
             ImGui.SetNextWindowPos(new System.Numerics.Vector2(viewX, viewY), ImGuiCond.Always);
@@ -371,28 +483,55 @@ namespace JplEphemerisOrbitViewer
             GL.ClearColor(0f, 0f, 0f, 1f);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-            // Responsive 
             UpdateResponsiveSizes();
 
-            var view = _cam.GetViewMatrix(target);
+            target = _selected?.Position ?? Vector3.Zero;
 
+            var view = _cam.GetViewMatrix(target);
             
             _cam.GetClipPlanes(sceneExtent: _cam.Distance, out float zNear, out float zFar);
-
             var projection = Matrix4.CreatePerspectiveFieldOfView(
                 MathHelper.DegreesToRadians(45f),
                 (float)_rt.Width / _rt.Height, zNear, zFar);
 
+            // Orbits
             if (_drawOrbits)
             {
-                
                 GL.LineWidth(_orbitLineWidthPx);
                 foreach (var (obj, orbit) in _orbits)
                 {
+                    bool vis = _orbitVisible.TryGetValue(obj, out var v) ? v : true;
+                    if (!vis) continue;
+
                     var col = _orbitColors.TryGetValue(obj, out var c) ? c : _orbitColor;
-                    orbit.Draw(_shader, view, projection, col, _orbitLineWidthPx); 
+                    orbit.Draw(_shader, view, projection, col, _orbitLineWidthPx);
                 }
                 GL.LineWidth(1.0f);
+            }
+
+            // Distance lines: update endpoints and draw
+            if (_centerObject != null)
+            {
+                foreach (var o in _objects)
+                {
+                    if (ReferenceEquals(o, _centerObject)) continue;
+                    if (!_distLineVisible.TryGetValue(o, out var show) || !show) continue;
+
+                    if (!_distLines.TryGetValue(o, out var line))
+                    {
+                        line = new DistanceLineRenderer();
+                        _distLines[o] = line;
+                    }
+                    line.UpdateEndpoints(_centerObject.Position, o.Position);
+                }
+
+                // Draw visible ones
+                Vector3 distColor = new(1.0f, 1.0f, 0.2f); // soft yellow
+                foreach (var (obj, line) in _distLines)
+                {
+                    if (_distLineVisible.TryGetValue(obj, out var show) && show)
+                        line.Draw(_shader, view, projection, distColor, _orbitLineWidthPx);
+                }
             }
 
             foreach (var o in _objects)
@@ -433,6 +572,24 @@ namespace JplEphemerisOrbitViewer
 
             _imgui.Render();
             SwapBuffers();
+        }
+
+        private (double au, double km) GetDistanceToCenter(SceneObject obj)
+        {
+            if (_centerObject == null || ReferenceEquals(obj, _centerObject))
+                return (0.0, 0.0);
+
+            // Prefer Horizons delta interpolation
+            if (_tracks.TryGetValue(obj, out var tr) && tr.Count > 0)
+            {
+                double au = tr.EvaluateDistanceAu(_simTimeUtc);
+                return (au, au * KmPerAU);
+            }
+
+            // Fallback from positions
+            float distUnits = (obj.Position - _centerObject.Position).Length;
+            double auPos = distUnits / _distUnitsPerAU;
+            return (auPos, auPos * KmPerAU);
         }
 
         private void TryAddObjectFromHorizons(string path)
@@ -483,7 +640,7 @@ namespace JplEphemerisOrbitViewer
                     return;
                 }
 
-               
+                // Center
                 if (_centerObject == null)
                 {
                     var centerScale = ToRadiusUnits(eph.CenterRadiiKmABC);
@@ -498,7 +655,7 @@ namespace JplEphemerisOrbitViewer
                         Color = Vector3.One,
                     };
                     _objects.Add(_centerObject);
-                    _baseScales[_centerObject] = _centerObject.Scale; // NEW
+                    _baseScales[_centerObject] = _centerObject.Scale;
                 }
 
                 if (track.Count == 0)
@@ -512,7 +669,6 @@ namespace JplEphemerisOrbitViewer
                 var targetScale = ToRadiusUnits(eph.TargetRadiiKmABC);
                 var targetTex = CreateTextureForBody(eph.TargetName);
 
-                
                 var go = new SceneObject(_sphereMesh!, _shader, texture: targetTex)
                 {
                     Name = eph.TargetName,
@@ -524,12 +680,11 @@ namespace JplEphemerisOrbitViewer
                 };
 
                 _objects.Add(go);
-                _baseScales[go] = go.Scale; // NEW
+                _baseScales[go] = go.Scale;
                 _selected = go;
                 _picker.SetSelected(go);
 
-               
-                _tracks[go] = track; 
+                _tracks[go] = track;
 
                 var orbit = new OrbitLineRenderer();
                 orbit.UpdateFromTrack(track, _distUnitsPerAU);
@@ -541,6 +696,24 @@ namespace JplEphemerisOrbitViewer
             {
                 _importError = $"Import error: {ex.Message}";
                 Console.WriteLine(ex);
+            }
+        }
+
+        // apply texture to selected object by replacing it with a new instance
+        private void TrySetSelectedTextureFromPath(string path)
+        {
+            if (_selected == null) return;
+
+            try
+            {
+                var tex = new Texture(path);
+                bool disposeOld = _selected.Texture != _whiteTexture; // don't dispose the shared white
+                _selected.SetTexture(tex, disposeOld);
+                _importError = "";
+            }
+            catch (Exception ex)
+            {
+                _importError = $"Texture load failed: {ex.Message}";
             }
         }
 
@@ -565,49 +738,55 @@ namespace JplEphemerisOrbitViewer
 
         private static float Max3(Vector3 v) => MathF.Max(v.X, MathF.Max(v.Y, v.Z));
 
-        
+        // Grow-only responsive update:
+        // - factor >= 1 => only grows when zooming out
+        // - near (zoom-in): stays at base scale
         private void UpdateResponsiveSizes()
         {
-            // Viewport yüksekliğini al
+            // Viewport height
             int[] vp = new int[4];
             GL.GetInteger(GetPName.Viewport, vp);
             int viewportH = Math.Max(1, vp[3]);
 
-            
+            // Keep camera FOV in sync with projection FOV
             _cam.FovY = MathHelper.DegreesToRadians(45f);
 
-            
-            const float minPixels = 6f;     
-            const float maxScale  = 1e6f;    
+            // Objects: grow-only
             foreach (var o in _objects)
             {
                 if (!_baseScales.TryGetValue(o, out var baseScale))
                     baseScale = o.Scale;
 
-                float baseRadius = o.BoundingRadiusLocal * Max3(baseScale);
-                float factor = _cam.GetMinScreenScaleForSphere(baseRadius, viewportH, minPixels, maxScale);
-                o.Scale = baseScale * factor;
+                if (_responsiveScaleEnabled)
+                {
+                    float baseRadius = o.BoundingRadiusLocal * Max3(baseScale);
+                    float factor = _cam.GetMinScreenScaleForSphere(baseRadius, viewportH, _minPixelsForObjects, maxScale: 1e6f);
+                    // GetMinScreenScaleForSphere clamps to [1, maxScale], so it never shrinks
+                    o.Scale = baseScale * factor;
+                }
+                else
+                {
+                    // Disabled: keep base scale
+                    o.Scale = baseScale;
+                }
             }
 
-           
-            _orbitLineWidthPx = _cam.GetResponsiveLineWidth(
-                dNear: 100f,       
-                dFar:  100000f,    
-                minPx: 1.25f,
-                maxPx: 3.0f);
+            // Orbits: line width responsive (optional)
+            _orbitLineWidthPx = _responsiveScaleEnabled
+                ? _cam.GetResponsiveLineWidth(_orbitWidthGrowNear, _orbitWidthGrowFar, _orbitWidthMinPx, _orbitWidthMaxPx)
+                : _orbitWidthMinPx;
         }
 
-       
         private void FrameOnObject(SceneObject o)
         {
             float baseRadius = o.BoundingRadiusLocal * MathF.Max(o.Scale.X, MathF.Max(o.Scale.Y, o.Scale.Z));
             float fovY = MathHelper.DegreesToRadians(45f);
             float desired = MathF.Max(0.1f, baseRadius / MathF.Tan(fovY * 0.5f) * 1.2f);
             _cam.Distance = desired;
-            _cam.FovY = fovY;            
+            _cam.FovY = fovY;
             _selected = o;
 
-            UpdateResponsiveSizes();     
+            UpdateResponsiveSizes();
         }
 
         protected override void OnFramebufferResize(FramebufferResizeEventArgs e)
@@ -624,10 +803,13 @@ namespace JplEphemerisOrbitViewer
                 obj.Dispose();
             foreach (var kv in _orbits)
                 kv.Value.Dispose();
+            foreach (var kv in _distLines)
+                kv.Value.Dispose();
             _sphereMesh?.Dispose();
             _shader.Dispose();
             _imgui.Dispose();
             _rt?.Dispose();
+            _whiteTexture?.Dispose();
         }
 
         private Vector3 ToRadiusUnits(Vector3d radiiKm)
@@ -709,7 +891,16 @@ namespace JplEphemerisOrbitViewer
                 _orbits.Remove(toRemove);
             }
 
+            if (_distLines.TryGetValue(toRemove, out var line))
+            {
+                line.Dispose();
+                _distLines.Remove(toRemove);
+            }
+            _distLineVisible.Remove(toRemove);
+
             _orbitColors.Remove(toRemove);
+            _orbitVisible.Remove(toRemove);
+            _baseScales.Remove(toRemove);
 
             _selected = _objects.LastOrDefault();
         }

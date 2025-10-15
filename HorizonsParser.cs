@@ -70,6 +70,13 @@ namespace JplEphemerisOrbitViewer.Horizons
         private static readonly Regex ReEquatorialRadius = new(@"^Equ\.\s*radius,\s*km\s*=\s*([0-9.\-]+)", RegexOptions.Compiled);
         private static readonly Regex RePolarAxis = new(@"^Polar\s*axis,\s*km\s*=\s*([0-9.\-]+)", RegexOptions.Compiled);
 
+        // NEW: Volumetric mean radius (target)
+        // Examples seen:
+        // "Vol. mean radius (km) = 3389.5"
+        // Be tolerant to spaces/case.
+        private static readonly Regex ReVolMeanRadius =
+            new(@"^Vol\.\s*mean\s*radius\s*\(km\)\s*=\s*([0-9.\-]+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
         // RA/DEC row regex
         private static readonly Regex TimeAtStart = new(@"^\s*(\d{4}-[A-Za-z]{3}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", RegexOptions.Compiled);
         private static readonly Regex RaDecGroup = new(@"\b(\d{2})\s+(\d{2})\s+(\d{1,2}(?:\.\d+)?)\s+([+\-]\d{2})\s+(\d{2})\s+(\d{1,2}(?:\.\d+)?)", RegexOptions.Compiled);
@@ -101,6 +108,9 @@ namespace JplEphemerisOrbitViewer.Horizons
             // New: stash Equatorial/Polar from GEOPHYSICAL PROPERTIES block for the target
             double? targetEquKm = null;
             double? targetPolarKm = null;
+
+            // NEW: Volumetric mean radius (target)
+            double? targetVolMeanKm = null;
 
             bool isTopocentric = false;
             double siteLonDeg = 0, siteLatDeg = 0, siteAltKm = 0;
@@ -152,7 +162,17 @@ namespace JplEphemerisOrbitViewer.Horizons
                     var m = RePolarAxis.Match(line);
                     if (m.Success) targetPolarKm = ParseD(m.Groups[1]);
                 }
-                else if (ReCenterSite.IsMatch(line))
+                // NEW: Vol. mean radius (km) for TARGET
+                else
+                {
+                    var mVol = ReVolMeanRadius.Match(line);
+                    if (mVol.Success)
+                    {
+                        targetVolMeanKm = ParseD(mVol.Groups[1]);
+                    }
+                }
+
+                if (ReCenterSite.IsMatch(line))
                 {
                     isTopocentric = true;
                 }
@@ -184,7 +204,14 @@ namespace JplEphemerisOrbitViewer.Horizons
                 }
             }
 
-            // Prefer GEOPHYSICAL Equ./Polar for target if explicit Target radii are not present
+            // Prefer explicit Target radii (A,B,C). If missing, prefer Vol. mean radius as a sphere.
+            // If that is also missing, fall back to Equatorial/Polar.
+            if (!haveTargetR && targetVolMeanKm.HasValue)
+            {
+                double r = targetVolMeanKm.Value;
+                targetR = new Vector3d(r, r, r);
+                haveTargetR = true;
+            }
             if (!haveTargetR && (targetEquKm.HasValue || targetPolarKm.HasValue))
             {
                 double a = targetEquKm ?? targetPolarKm ?? 1000.0;

@@ -74,12 +74,13 @@ namespace JplEphemerisOrbitViewer
 
         // NEW: scale factor so a sphere with baseWorldRadius shows at least minPixels on screen.
         // baseWorldRadius = BoundingRadiusLocal * Max(baseScale.X, baseScale.Y, baseScale.Z)
-        public float GetMinScreenScaleForSphere(float baseWorldRadius, int viewportHeight, float minPixels, float maxScale = 1e6f)
+        // add a small deadzone so factor stays 1 near threshold and avoids flicker
+        public float GetMinScreenScaleForSphere(float baseWorldRadius, int viewportHeight, float minPixels, float maxScale = 1e6f, float deadzone = 0.03f)
         {
             if (baseWorldRadius <= 0f || viewportHeight <= 0) return 1f;
             float k = MathF.Tan(FovY * 0.5f);
-            // Derived so that on-screen pixel height >= minPixels
             float s = (minPixels * Distance * k) / (baseWorldRadius * viewportHeight);
+            if (s < 1f + deadzone) return 1f; // grow-only with deadzone near 1x
             return MathHelper.Clamp(s, 1f, maxScale);
         }
 

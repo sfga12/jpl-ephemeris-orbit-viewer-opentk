@@ -29,7 +29,7 @@ namespace JplEphemerisOrbitViewer
 
         private readonly Mesh _mesh;
         private readonly Shader _shader;
-        private readonly Texture? _texture;
+        private Texture? _texture; // 1) Make this mutable (remove readonly)
 
         public SceneObject(Mesh mesh, Shader shader, Texture? texture = null)
         {
@@ -112,6 +112,18 @@ namespace JplEphemerisOrbitViewer
             }
 
             _mesh.Draw();
+        }
+
+        public Texture? Texture => _texture; // 2) Add accessor + setter inside the class
+
+        public void SetTexture(Texture? texture, bool disposeOld = true)
+        {
+            if (!ReferenceEquals(_texture, texture))
+            {
+                if (disposeOld && _texture is IDisposable d && !ReferenceEquals(_texture, texture))
+                    d.Dispose();
+                _texture = texture;
+            }
         }
 
         public void Dispose() => _mesh.Dispose();
